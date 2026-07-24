@@ -1,13 +1,16 @@
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Write},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    rc::Rc,
     sync::mpsc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,14 +19,21 @@ use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem},
 };
 use windowscodexmonitor::{
-    GaugeZone, MonitorStatus, SessionSignal, WeeklyQuota, classify_monitor_status, parse_weekly_quota,
+    GaugeZone, MonitorStatus, SessionSignal, WeeklyQuota, classify_monitor_status,
+    parse_weekly_quota,
 };
 use winit::{
-    event::Event,
-    event_loop::{ControlFlow, EventLoop, EventLoopProxy},
+    dpi::{LogicalSize, PhysicalPosition},
+    event::{ElementState, Event, MouseButton as WinitMouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
+    window::{Window, WindowAttributes, WindowLevel},
 };
 
 const ICON_SIZE: u32 = 32;
+const POPUP_WIDTH: u32 = 330;
+const POPUP_HEIGHT: u32 = 260;
+const REFRESH_BOUNDS: (f64, f64, f64, f64) = (206.0, 186.0, 103.0, 31.0);
+const AUTO_START_BOUNDS: (f64, f64, f64, f64) = (16.0, 224.0, 298.0, 28.0);
 
 #[derive(Debug)]
 enum UserEvent {
@@ -38,13 +48,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|argument| argument == "--diagnose") {
         return diagnose().map_err(Into::into);
     }
+    let mut preview_popup = std::env::args().any(|argument| argument == "--preview");
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let popup_context = softbuffer::Context::new(event_loop.owned_display_handle())?;
     let proxy = event_loop.create_proxy();
     let mut settings = AppSettings::load();
     let tray_menu = Menu::new();
     let refresh_item = MenuItem::new("Refresh now", true, None);
-    let auto_start_item = CheckMenuItem::new("Start with Windows", true, settings.start_with_windows, None);
+    let auto_start_item = CheckMenuItem::new(
+        "Start with Windows",
+        true,
+        settings.start_with_windows,
+        None,
+    );
     let quit_item = MenuItem::new("Exit", true, None);
     tray_menu.append(&refresh_item)?;
     tray_menu.append(&auto_start_item)?;
@@ -58,20 +75,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_icon(render_gauge_icon(state.remaining_percent, state.status)?)
         .build()?;
     let event_proxy = proxy.clone();
+    let mut popup = None;
     request_usage(proxy);
     start_watchdog(event_proxy.clone());
 
     event_loop.run(move |event, target| {
         target.set_control_flow(ControlFlow::Wait);
+        if preview_popup {
+            show_popup(target, &popup_context, &mut popup);
+            preview_popup = false;
+        }
         if let Event::UserEvent(event) = event {
             match event {
                 UserEvent::Usage(result) => {
                     state.apply_usage(result);
                     update_tray(&tray, &state);
+                    request_popup_redraw(&popup);
                 }
                 UserEvent::Status(status) => {
                     state.status = status;
                     update_tray(&tray, &state);
+                    request_popup_redraw(&popup);
                 }
                 UserEvent::Menu(menu_event) if menu_event.id == auto_start_item.id() => {
                     settings.start_with_windows = auto_start_item.is_checked();
@@ -83,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.last_error = Some(error);
                     }
                     update_tray(&tray, &state);
+                    request_popup_redraw(&popup);
                 }
                 UserEvent::Menu(menu_event) if menu_event.id == refresh_item.id() => {
                     request_usage(event_proxy.clone());
@@ -91,12 +116,543 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 UserEvent::Tray(TrayIconEvent::Click {
                     button: MouseButton::Left,
                     ..
-                }) => request_usage(event_proxy.clone()),
+                }) => {
+                    show_popup(target, &popup_context, &mut popup);
+                    request_usage(event_proxy.clone());
+                }
                 _ => {}
             }
+        } else if let Event::WindowEvent { window_id, event } = event
+            && popup
+                .as_ref()
+                .is_some_and(|current| current.window.id() == window_id)
+        {
+            handle_popup_event(
+                target,
+                &event_proxy,
+                &mut settings,
+                &auto_start_item,
+                &mut state,
+                &mut popup,
+                event,
+            );
         }
     })?;
     Ok(())
+}
+
+struct Popup {
+    window: Rc<Window>,
+    surface: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
+    cursor: PhysicalPosition<f64>,
+}
+
+fn show_popup(
+    target: &ActiveEventLoop,
+    context: &softbuffer::Context<OwnedDisplayHandle>,
+    popup: &mut Option<Popup>,
+) {
+    if let Some(existing) = popup {
+        existing.window.set_visible(true);
+        existing.window.focus_window();
+        existing.window.request_redraw();
+        return;
+    }
+
+    let attributes = WindowAttributes::default()
+        .with_title("Windows Codex Monitor")
+        .with_inner_size(LogicalSize::new(
+            f64::from(POPUP_WIDTH),
+            f64::from(POPUP_HEIGHT),
+        ))
+        .with_min_inner_size(LogicalSize::new(
+            f64::from(POPUP_WIDTH),
+            f64::from(POPUP_HEIGHT),
+        ))
+        .with_max_inner_size(LogicalSize::new(
+            f64::from(POPUP_WIDTH),
+            f64::from(POPUP_HEIGHT),
+        ))
+        .with_resizable(false)
+        .with_window_level(WindowLevel::AlwaysOnTop);
+    let Ok(window) = target.create_window(attributes) else {
+        return;
+    };
+    let window = Rc::new(window);
+    let Ok(surface) = softbuffer::Surface::new(context, window.clone()) else {
+        return;
+    };
+    window.request_redraw();
+    *popup = Some(Popup {
+        window,
+        surface,
+        cursor: PhysicalPosition::new(-1.0, -1.0),
+    });
+}
+
+fn request_popup_redraw(popup: &Option<Popup>) {
+    if let Some(popup) = popup {
+        popup.window.request_redraw();
+    }
+}
+
+fn handle_popup_event(
+    _target: &ActiveEventLoop,
+    proxy: &EventLoopProxy<UserEvent>,
+    settings: &mut AppSettings,
+    auto_start_item: &CheckMenuItem,
+    state: &mut AppState,
+    popup: &mut Option<Popup>,
+    event: WindowEvent,
+) {
+    match event {
+        WindowEvent::CloseRequested => *popup = None,
+        WindowEvent::CursorMoved { position, .. } => {
+            if let Some(popup) = popup {
+                popup.cursor = position;
+            }
+        }
+        WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button: WinitMouseButton::Left,
+            ..
+        } => {
+            let Some(current) = popup.as_ref() else {
+                return;
+            };
+            let logical_cursor = current
+                .cursor
+                .to_logical::<f64>(current.window.scale_factor());
+            if contains(logical_cursor, REFRESH_BOUNDS) {
+                request_usage(proxy.clone());
+            } else if contains(logical_cursor, AUTO_START_BOUNDS) {
+                settings.start_with_windows = !settings.start_with_windows;
+                if let Err(error) = set_auto_start(settings.start_with_windows) {
+                    settings.start_with_windows = !settings.start_with_windows;
+                    state.last_error = Some(error);
+                } else if let Err(error) = settings.save() {
+                    state.last_error = Some(error);
+                }
+                auto_start_item.set_checked(settings.start_with_windows);
+                request_popup_redraw(popup);
+            }
+        }
+        WindowEvent::RedrawRequested => {
+            if let Some(popup) = popup.as_mut() {
+                let _ = render_popup(popup, state, settings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn contains(position: winit::dpi::LogicalPosition<f64>, bounds: (f64, f64, f64, f64)) -> bool {
+    position.x >= bounds.0
+        && position.x <= bounds.0 + bounds.2
+        && position.y >= bounds.1
+        && position.y <= bounds.1 + bounds.3
+}
+
+fn render_popup(popup: &mut Popup, state: &AppState, settings: &AppSettings) -> Result<(), String> {
+    let size = popup.window.inner_size();
+    let width = NonZeroU32::new(size.width).ok_or_else(|| "Popup width was zero".to_owned())?;
+    let height = NonZeroU32::new(size.height).ok_or_else(|| "Popup height was zero".to_owned())?;
+    popup
+        .surface
+        .resize(width, height)
+        .map_err(|error| error.to_string())?;
+    let mut buffer = popup
+        .surface
+        .buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let (width, height) = (buffer.width().get(), buffer.height().get());
+    buffer.fill(rgb(24, 27, 33));
+    let scale = width as f32 / POPUP_WIDTH as f32;
+
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        16.0,
+        16.0,
+        2,
+        "CODEX WEEKLY",
+        rgb(222, 226, 233),
+        scale,
+    );
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        17.0,
+        43.0,
+        1,
+        "remaining quota",
+        rgb(150, 159, 171),
+        scale,
+    );
+    draw_popup_gauge(
+        &mut buffer,
+        width,
+        height,
+        state.remaining_percent,
+        state.status,
+        scale,
+    );
+
+    let percentage = format!("{}% LEFT", state.remaining_percent);
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        140.0,
+        76.0,
+        3,
+        &percentage,
+        zone_color(state),
+        scale,
+    );
+    let reset = state
+        .reset_at
+        .map(reset_summary)
+        .unwrap_or_else(|| "reset unknown".to_owned());
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        143.0,
+        119.0,
+        1,
+        &reset,
+        rgb(170, 178, 188),
+        scale,
+    );
+    let status = format!("STATUS  {}", state.status.label().to_uppercase());
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        143.0,
+        145.0,
+        1,
+        &status,
+        status_color(state.status),
+        scale,
+    );
+
+    fill_rect(
+        &mut buffer,
+        width,
+        height,
+        206.0,
+        186.0,
+        103.0,
+        31.0,
+        rgb(49, 91, 190),
+        scale,
+    );
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        224.0,
+        196.0,
+        1,
+        "REFRESH",
+        rgb(255, 255, 255),
+        scale,
+    );
+    fill_rect(
+        &mut buffer,
+        width,
+        height,
+        16.0,
+        224.0,
+        298.0,
+        28.0,
+        rgb(35, 40, 48),
+        scale,
+    );
+    draw_text(
+        &mut buffer,
+        width,
+        height,
+        27.0,
+        234.0,
+        1,
+        "START WITH WINDOWS",
+        rgb(205, 211, 220),
+        scale,
+    );
+    let toggle_color = if settings.start_with_windows {
+        rgb(67, 201, 122)
+    } else {
+        rgb(100, 107, 119)
+    };
+    fill_rect(
+        &mut buffer,
+        width,
+        height,
+        274.0,
+        230.0,
+        27.0,
+        16.0,
+        toggle_color,
+        scale,
+    );
+    fill_rect(
+        &mut buffer,
+        width,
+        height,
+        if settings.start_with_windows {
+            287.0
+        } else {
+            276.0
+        },
+        232.0,
+        12.0,
+        12.0,
+        rgb(245, 247, 250),
+        scale,
+    );
+    if let Some(error) = &state.last_error {
+        draw_text(
+            &mut buffer,
+            width,
+            height,
+            16.0,
+            188.0,
+            1,
+            &truncate(error, 28),
+            rgb(238, 138, 79),
+            scale,
+        );
+    }
+    buffer.present().map_err(|error| error.to_string())
+}
+
+fn zone_color(state: &AppState) -> u32 {
+    if state.status == MonitorStatus::Offline {
+        rgb(140, 147, 160)
+    } else {
+        match GaugeZone::for_remaining(state.remaining_percent) {
+            GaugeZone::Green => rgb(67, 201, 122),
+            GaugeZone::Yellow => rgb(246, 201, 63),
+            GaugeZone::Orange => rgb(239, 142, 50),
+            GaugeZone::Red => rgb(228, 75, 75),
+        }
+    }
+}
+
+fn status_color(status: MonitorStatus) -> u32 {
+    match status {
+        MonitorStatus::Working => rgb(67, 201, 122),
+        MonitorStatus::Waiting => rgb(246, 201, 63),
+        MonitorStatus::Idle => rgb(170, 178, 188),
+        MonitorStatus::Offline => rgb(140, 147, 160),
+        MonitorStatus::SuspectedHung => rgb(239, 142, 50),
+    }
+}
+
+fn draw_popup_gauge(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    remaining_percent: u8,
+    status: MonitorStatus,
+    scale: f32,
+) {
+    let center = (75.0 * scale, 127.0 * scale);
+    let radius = 47.0 * scale;
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - center.0;
+            let dy = y as f32 - center.1;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if (radius - 5.0 * scale..=radius).contains(&distance) {
+                buffer[(y * width + x) as usize] = rgb(62, 69, 79);
+            }
+        }
+    }
+    let angle = (-135.0 + f32::from(remaining_percent) * 2.7).to_radians();
+    let end = (
+        center.0 + angle.cos() * 36.0 * scale,
+        center.1 + angle.sin() * 36.0 * scale,
+    );
+    draw_line_u32(
+        buffer,
+        width,
+        height,
+        center,
+        end,
+        2.2 * scale,
+        zone_color_for(status, remaining_percent),
+    );
+    draw_disc_u32(
+        buffer,
+        width,
+        height,
+        center,
+        5.0 * scale,
+        zone_color_for(status, remaining_percent),
+    );
+}
+
+fn zone_color_for(status: MonitorStatus, remaining_percent: u8) -> u32 {
+    zone_color(&AppState {
+        remaining_percent,
+        status,
+        reset_at: None,
+        last_error: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Coordinates and pixel buffer stay explicit in this small software renderer.
+fn draw_text(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    glyph_scale: u32,
+    text: &str,
+    color: u32,
+    dpi_scale: f32,
+) {
+    let glyph_scale = (glyph_scale as f32 * dpi_scale).round().max(1.0) as u32;
+    let mut cursor_x = (x * dpi_scale).round() as i32;
+    let cursor_y = (y * dpi_scale).round() as i32;
+    for character in text.chars() {
+        if let Some(glyph) = BASIC_FONTS.get(character) {
+            for (row, bits) in glyph.iter().enumerate() {
+                for column in 0..8 {
+                    if bits & (1 << column) != 0 {
+                        fill_rect_pixels(
+                            buffer,
+                            width,
+                            height,
+                            cursor_x + column * glyph_scale as i32,
+                            cursor_y + row as i32 * glyph_scale as i32,
+                            glyph_scale,
+                            glyph_scale,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        cursor_x += 8 * glyph_scale as i32;
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Keeps draw calls readable without a heap-allocated scene graph.
+fn fill_rect(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    rect_width: f32,
+    rect_height: f32,
+    color: u32,
+    scale: f32,
+) {
+    fill_rect_pixels(
+        buffer,
+        width,
+        height,
+        (x * scale).round() as i32,
+        (y * scale).round() as i32,
+        (rect_width * scale).round() as u32,
+        (rect_height * scale).round() as u32,
+        color,
+    );
+}
+
+#[allow(clippy::too_many_arguments)] // Low-level primitive intentionally exposes buffer and rectangle dimensions.
+fn fill_rect_pixels(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    rect_width: u32,
+    rect_height: u32,
+    color: u32,
+) {
+    for row in y.max(0) as u32..(y + rect_height as i32).max(0) as u32 {
+        for column in x.max(0) as u32..(x + rect_width as i32).max(0) as u32 {
+            if column < width && row < height {
+                buffer[(row * width + column) as usize] = color;
+            }
+        }
+    }
+}
+
+fn draw_line_u32(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    start: (f32, f32),
+    end: (f32, f32),
+    radius: f32,
+    color: u32,
+) {
+    let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0) as u32;
+    for step in 0..=steps {
+        let t = step as f32 / steps.max(1) as f32;
+        draw_disc_u32(
+            buffer,
+            width,
+            height,
+            (
+                start.0 + (end.0 - start.0) * t,
+                start.1 + (end.1 - start.1) * t,
+            ),
+            radius,
+            color,
+        );
+    }
+}
+
+fn draw_disc_u32(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    center: (f32, f32),
+    radius: f32,
+    color: u32,
+) {
+    let start_y = (center.1 - radius).floor().max(0.0) as u32;
+    let end_y = (center.1 + radius).ceil().min(height as f32) as u32;
+    let start_x = (center.0 - radius).floor().max(0.0) as u32;
+    let end_x = (center.0 + radius).ceil().min(width as f32) as u32;
+    for y in start_y..end_y {
+        for x in start_x..end_x {
+            let dx = x as f32 - center.0;
+            let dy = y as f32 - center.1;
+            if dx * dx + dy * dy <= radius * radius {
+                buffer[(y * width + x) as usize] = color;
+            }
+        }
+    }
+}
+
+fn rgb(red: u8, green: u8, blue: u8) -> u32 {
+    u32::from(blue) | (u32::from(green) << 8) | (u32::from(red) << 16)
+}
+
+fn truncate(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_owned()
+    } else {
+        format!(
+            "{}...",
+            text.chars()
+                .take(limit.saturating_sub(3))
+                .collect::<String>()
+        )
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -107,7 +663,11 @@ struct AppSettings {
 
 impl AppSettings {
     fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("WindowsCodexMonitor").join("settings.json"))
+        Some(
+            PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+                .join("WindowsCodexMonitor")
+                .join("settings.json"),
+        )
     }
 
     fn load() -> Self {
@@ -119,10 +679,16 @@ impl AppSettings {
 
     fn save(&self) -> Result<(), String> {
         let path = Self::path().ok_or_else(|| "LOCALAPPDATA is unavailable".to_owned())?;
-        let directory = path.parent().ok_or_else(|| "Settings directory is unavailable".to_owned())?;
-        fs::create_dir_all(directory).map_err(|error| format!("Could not create settings directory: {error}"))?;
-        fs::write(path, serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("Could not save settings: {error}"))
+        let directory = path
+            .parent()
+            .ok_or_else(|| "Settings directory is unavailable".to_owned())?;
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("Could not create settings directory: {error}"))?;
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("Could not save settings: {error}"))
     }
 }
 
@@ -133,9 +699,13 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
         .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
         .map_err(|error| format!("Could not open Windows startup settings: {error}"))?;
     if enabled {
-        let executable = std::env::current_exe().map_err(|error| format!("Could not locate monitor executable: {error}"))?;
-        run.set_value("WindowsCodexMonitor", &format!("\"{}\"", executable.display()))
-            .map_err(|error| format!("Could not enable auto-start: {error}"))
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate monitor executable: {error}"))?;
+        run.set_value(
+            "WindowsCodexMonitor",
+            &format!("\"{}\"", executable.display()),
+        )
+        .map_err(|error| format!("Could not enable auto-start: {error}"))
     } else {
         match run.delete_value("WindowsCodexMonitor") {
             Ok(()) => Ok(()),
@@ -159,9 +729,11 @@ fn diagnose() -> Result<(), String> {
 }
 
 fn start_watchdog(proxy: EventLoopProxy<UserEvent>) {
-    thread::spawn(move || loop {
-        let _ = proxy.send_event(UserEvent::Status(read_watchdog_status()));
-        thread::sleep(Duration::from_secs(3));
+    thread::spawn(move || {
+        loop {
+            let _ = proxy.send_event(UserEvent::Status(read_watchdog_status()));
+            thread::sleep(Duration::from_secs(3));
+        }
     });
 }
 
@@ -184,14 +756,21 @@ fn codex_process_present() -> bool {
     Command::new("tasklist")
         .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
         .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains("codex.exe"))
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .contains("codex.exe")
+        })
         .unwrap_or(false)
 }
 
 fn most_recent_session_file() -> Option<PathBuf> {
     let root = std::env::var_os("USERPROFILE")?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    find_session_files(&Path::new(&root).join(".codex").join("sessions"), &mut newest);
+    find_session_files(
+        &Path::new(&root).join(".codex").join("sessions"),
+        &mut newest,
+    );
     newest.map(|(_, path)| path)
 }
 
@@ -203,9 +782,13 @@ fn find_session_files(directory: &Path, newest: &mut Option<(SystemTime, PathBuf
         let path = entry.path();
         if path.is_dir() {
             find_session_files(&path, newest);
-        } else if path.extension().is_some_and(|extension| extension == "jsonl")
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
             && let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified())
-            && newest.as_ref().is_none_or(|(current, _)| modified > *current)
+            && newest
+                .as_ref()
+                .is_none_or(|(current, _)| modified > *current)
         {
             *newest = Some((modified, path));
         }
@@ -217,12 +800,19 @@ fn read_last_session_signal(path: &Path) -> Option<SessionSignal> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(length.saturating_sub(TAIL_BYTES))).ok()?;
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL_BYTES)))
+        .ok()?;
     let mut tail = String::new();
     file.read_to_string(&mut tail).ok()?;
     tail.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|event| event.get("payload")?.get("type")?.as_str().map(str::to_owned))
+        .filter_map(|event| {
+            event
+                .get("payload")?
+                .get("type")?
+                .as_str()
+                .map(str::to_owned)
+        })
         .next_back()
         .map(|event_type| match event_type.as_str() {
             "task_complete" => SessionSignal::Completed,
@@ -333,22 +923,29 @@ fn read_codex_quota() -> Result<WeeklyQuota, String> {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let result = (|| {
-                let line = line.map_err(|error| format!("Could not read Codex response: {error}"))?;
+                let line =
+                    line.map_err(|error| format!("Could not read Codex response: {error}"))?;
                 let message: Value = serde_json::from_str(&line)
                     .map_err(|error| format!("Invalid Codex response: {error}"))?;
                 match message.get("id").and_then(Value::as_i64) {
                     Some(0) => {
-                        write_json_line(&mut stdin, json!({ "method": "initialized", "params": {} }))?;
+                        write_json_line(
+                            &mut stdin,
+                            json!({ "method": "initialized", "params": {} }),
+                        )?;
                         write_json_line(
                             &mut stdin,
                             json!({ "method": "account/rateLimits/read", "id": 1 }),
                         )?;
                         Ok(None)
                     }
-                    Some(1) if message.get("error").is_some() => {
-                        Err(format!("Codex rejected usage request: {}", message["error"]))
-                    }
-                    Some(1) => parse_weekly_quota(&line).map(Some).map_err(|error| error.to_string()),
+                    Some(1) if message.get("error").is_some() => Err(format!(
+                        "Codex rejected usage request: {}",
+                        message["error"]
+                    )),
+                    Some(1) => parse_weekly_quota(&line)
+                        .map(Some)
+                        .map_err(|error| error.to_string()),
                     _ => Ok(None),
                 }
             })();
@@ -421,13 +1018,17 @@ fn find_codex_executable() -> Result<PathBuf, String> {
             fallback.is_file().then_some(fallback)
         })
         .ok_or_else(|| {
-            "Could not find native codex.exe. Install Codex or set CODEX_MONITOR_CODEX_PATH.".to_owned()
+            "Could not find native codex.exe. Install Codex or set CODEX_MONITOR_CODEX_PATH."
+                .to_owned()
         })
 }
 
 fn write_json_line(writer: &mut impl Write, message: Value) -> Result<(), String> {
-    writeln!(writer, "{message}").map_err(|error| format!("Could not write Codex request: {error}"))?;
-    writer.flush().map_err(|error| format!("Could not send Codex request: {error}"))
+    writeln!(writer, "{message}")
+        .map_err(|error| format!("Could not write Codex request: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("Could not send Codex request: {error}"))
 }
 
 fn update_tray(tray: &TrayIcon, state: &AppState) {
@@ -437,7 +1038,10 @@ fn update_tray(tray: &TrayIcon, state: &AppState) {
     let _ = tray.set_tooltip(Some(state.tooltip()));
 }
 
-fn render_gauge_icon(remaining_percent: u8, status: MonitorStatus) -> Result<Icon, tray_icon::BadIcon> {
+fn render_gauge_icon(
+    remaining_percent: u8,
+    status: MonitorStatus,
+) -> Result<Icon, tray_icon::BadIcon> {
     let mut image = RgbaImage::from_pixel(ICON_SIZE, ICON_SIZE, Rgba([0, 0, 0, 0]));
     let center = (15.5_f32, 16.0_f32);
     let radius = 12.5_f32;
@@ -479,7 +1083,10 @@ fn draw_line(image: &mut RgbaImage, start: (f32, f32), end: (f32, f32), color: R
         let t = step as f32 / steps.max(1) as f32;
         draw_disc(
             image,
-            (start.0 + (end.0 - start.0) * t, start.1 + (end.1 - start.1) * t),
+            (
+                start.0 + (end.0 - start.0) * t,
+                start.1 + (end.1 - start.1) * t,
+            ),
             1.0,
             color,
         );
