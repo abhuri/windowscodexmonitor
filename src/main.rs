@@ -34,6 +34,10 @@ enum UserEvent {
 
 #[allow(deprecated)] // tray-icon currently requires winit's closure-based Windows event loop.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|argument| argument == "--diagnose") {
+        return diagnose().map_err(Into::into);
+    }
+
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let tray_menu = Menu::new();
@@ -77,6 +81,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     })?;
+    Ok(())
+}
+
+fn diagnose() -> Result<(), String> {
+    let status = read_watchdog_status();
+    let quota = read_codex_quota()?;
+    let reset = quota
+        .resets_at_unix_seconds
+        .map(reset_summary)
+        .unwrap_or_else(|| "reset unknown".to_owned());
+    println!("Weekly remaining: {}%", quota.remaining_percent);
+    println!("{reset}");
+    println!("Status: {}", status.label());
     Ok(())
 }
 
@@ -218,7 +235,7 @@ fn request_usage(proxy: EventLoopProxy<UserEvent>) {
 }
 
 fn read_codex_quota() -> Result<WeeklyQuota, String> {
-    let mut child = Command::new("codex")
+    let mut child = Command::new(find_codex_executable()?)
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -294,6 +311,57 @@ fn read_codex_quota() -> Result<WeeklyQuota, String> {
         .map_err(|_| "Timed out waiting for Codex weekly usage".to_owned());
     let _ = child.kill();
     result?
+}
+
+fn find_codex_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("CODEX_MONITOR_CODEX_PATH").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "CODEX_MONITOR_CODEX_PATH does not point to a file: {}",
+            path.display()
+        ));
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            Path::new(&local_app_data)
+                .join("OpenAI")
+                .join("CodexCli")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex-win32-x64")
+                .join("vendor")
+                .join("x86_64-pc-windows-msvc")
+                .join("bin")
+                .join("codex.exe"),
+        );
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let windows_apps = Path::new(&program_files).join("WindowsApps");
+        if let Ok(entries) = fs::read_dir(windows_apps) {
+            candidates.extend(entries.flatten().filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .filter(|name| name.starts_with("OpenAI.Codex_"))
+                    .map(|_| entry.path().join("app").join("resources").join("codex.exe"))
+            }));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .or_else(|| {
+            let fallback = PathBuf::from("codex.exe");
+            fallback.is_file().then_some(fallback)
+        })
+        .ok_or_else(|| {
+            "Could not find native codex.exe. Install Codex or set CODEX_MONITOR_CODEX_PATH.".to_owned()
+        })
 }
 
 fn write_json_line(writer: &mut impl Write, message: Value) -> Result<(), String> {

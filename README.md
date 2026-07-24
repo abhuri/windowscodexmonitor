@@ -40,7 +40,15 @@ cargo test
 cargo run --release
 ```
 
+Use the non-UI diagnostic mode to verify local Codex access:
+
+```powershell
+cargo run --release -- --diagnose
+```
+
 The Codex account endpoint is available to Codex-service authentication, not API-key-only sign-ins. If the usage endpoint is unavailable, the tray tooltip reports the monitor as offline and leaves Codex itself unaffected.
+
+If Codex is installed in a non-standard location, set `CODEX_MONITOR_CODEX_PATH` to the absolute path of its native `codex.exe` before starting the monitor.
 
 ## Install from GitHub
 
