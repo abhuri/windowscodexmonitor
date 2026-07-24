@@ -312,6 +312,7 @@ fn render_popup(popup: &mut Popup, state: &AppState, settings: &AppSettings) -> 
         &mut buffer,
         width,
         height,
+        popup.font.as_ref(),
         state.remaining_percent,
         state.status,
         scale,
@@ -536,44 +537,98 @@ fn draw_popup_gauge(
     buffer: &mut [u32],
     width: u32,
     height: u32,
+    font: Option<&Font>,
     remaining_percent: u8,
     status: MonitorStatus,
     scale: f32,
 ) {
-    let center = (75.0 * scale, 127.0 * scale);
-    let radius = 47.0 * scale;
+    let center = (82.0 * scale, 147.0 * scale);
+    let radius = 57.0 * scale;
+    let ring_width = 7.0 * scale;
     for y in 0..height {
         for x in 0..width {
             let dx = x as f32 - center.0;
             let dy = y as f32 - center.1;
             let distance = (dx * dx + dy * dy).sqrt();
-            if (radius - 5.0 * scale..=radius).contains(&distance) {
-                buffer[(y * width + x) as usize] = rgb(62, 69, 79);
+            let angle = dy.atan2(dx);
+            if (radius - ring_width..=radius).contains(&distance)
+                && (-std::f32::consts::PI..=0.0).contains(&angle)
+            {
+                let percent =
+                    ((angle + std::f32::consts::PI) / std::f32::consts::PI * 100.0).round() as u8;
+                buffer[(y * width + x) as usize] = gauge_band_color(percent);
             }
         }
     }
-    let angle = (-135.0 + f32::from(remaining_percent) * 2.7).to_radians();
+    for percent in [0_u8, 25, 50, 75, 100] {
+        let angle = (-180.0 + f32::from(percent) * 1.8).to_radians();
+        let outer = (
+            center.0 + angle.cos() * (radius + 2.0 * scale),
+            center.1 + angle.sin() * (radius + 2.0 * scale),
+        );
+        let inner = (
+            center.0 + angle.cos() * (radius - 10.0 * scale),
+            center.1 + angle.sin() * (radius - 10.0 * scale),
+        );
+        draw_line_u32(
+            buffer,
+            width,
+            height,
+            outer,
+            inner,
+            1.0 * scale,
+            rgb(226, 232, 240),
+        );
+    }
+    let angle = (-180.0 + f32::from(remaining_percent) * 1.8).to_radians();
     let end = (
-        center.0 + angle.cos() * 36.0 * scale,
-        center.1 + angle.sin() * 36.0 * scale,
+        center.0 + angle.cos() * 43.0 * scale,
+        center.1 + angle.sin() * 43.0 * scale,
     );
+    let needle_color = zone_color_for(status, remaining_percent);
     draw_line_u32(
         buffer,
         width,
         height,
         center,
         end,
-        2.2 * scale,
-        zone_color_for(status, remaining_percent),
+        2.0 * scale,
+        needle_color,
     );
-    draw_disc_u32(
+    draw_disc_u32(buffer, width, height, center, 5.0 * scale, needle_color);
+    draw_ui_text(
         buffer,
         width,
         height,
-        center,
-        5.0 * scale,
-        zone_color_for(status, remaining_percent),
+        font,
+        20.0,
+        155.0,
+        11.0,
+        "0",
+        rgb(148, 163, 184),
+        scale,
     );
+    draw_ui_text(
+        buffer,
+        width,
+        height,
+        font,
+        118.0,
+        155.0,
+        11.0,
+        "100",
+        rgb(148, 163, 184),
+        scale,
+    );
+}
+
+fn gauge_band_color(remaining_percent: u8) -> u32 {
+    match GaugeZone::for_remaining(remaining_percent) {
+        GaugeZone::Green => rgb(67, 201, 122),
+        GaugeZone::Yellow => rgb(246, 201, 63),
+        GaugeZone::Orange => rgb(239, 142, 50),
+        GaugeZone::Red => rgb(228, 75, 75),
+    }
 }
 
 fn zone_color_for(status: MonitorStatus, remaining_percent: u8) -> u32 {
