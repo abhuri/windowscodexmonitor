@@ -1,0 +1,51 @@
+name: Build Windows Codex Monitor
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Lint
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Package executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/windowscodexmonitor.exe dist/WindowsCodexMonitor.exe
+          Compress-Archive -Path dist/WindowsCodexMonitor.exe -DestinationPath WindowsCodexMonitor-win-x64.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsCodexMonitor-win-x64
+          path: WindowsCodexMonitor-win-x64.zip
+          if-no-files-found: error
+
+      - name: Create GitHub release for a version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create $env:GITHUB_REF_NAME WindowsCodexMonitor-win-x64.zip --generate-notes --title $env:GITHUB_REF_NAME

@@ -42,6 +42,10 @@ cargo run --release
 
 The Codex account endpoint is available to Codex-service authentication, not API-key-only sign-ins. If the usage endpoint is unavailable, the tray tooltip reports the monitor as offline and leaves Codex itself unaffected.
 
+## Install from GitHub
+
+Every push to `main` is built and tested on GitHub Actions. A version tag such as `v0.1.0` creates a GitHub Release containing `WindowsCodexMonitor-win-x64.zip`. Extract the executable and run it on a Windows machine that has Codex installed and signed in.
+
 ## Privacy and security
 
 The application invokes the local `codex app-server` process and consumes only its rate-limit response. It does not parse or export `auth.json`, credentials, prompts, or source files.
