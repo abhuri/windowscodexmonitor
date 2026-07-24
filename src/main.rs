@@ -9,10 +9,11 @@ use std::{
 };
 
 use image::{Rgba, RgbaImage};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tray_icon::{
     Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem},
 };
 use windowscodexmonitor::{
     GaugeZone, MonitorStatus, SessionSignal, WeeklyQuota, classify_monitor_status, parse_weekly_quota,
@@ -40,10 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    let mut settings = AppSettings::load();
     let tray_menu = Menu::new();
     let refresh_item = MenuItem::new("Refresh now", true, None);
+    let auto_start_item = CheckMenuItem::new("Start with Windows", true, settings.start_with_windows, None);
     let quit_item = MenuItem::new("Exit", true, None);
     tray_menu.append(&refresh_item)?;
+    tray_menu.append(&auto_start_item)?;
     tray_menu.append(&quit_item)?;
 
     install_event_handlers(proxy.clone());
@@ -69,6 +73,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.status = status;
                     update_tray(&tray, &state);
                 }
+                UserEvent::Menu(menu_event) if menu_event.id == auto_start_item.id() => {
+                    settings.start_with_windows = auto_start_item.is_checked();
+                    if let Err(error) = set_auto_start(settings.start_with_windows) {
+                        settings.start_with_windows = !settings.start_with_windows;
+                        auto_start_item.set_checked(settings.start_with_windows);
+                        state.last_error = Some(error);
+                    } else if let Err(error) = settings.save() {
+                        state.last_error = Some(error);
+                    }
+                    update_tray(&tray, &state);
+                }
                 UserEvent::Menu(menu_event) if menu_event.id == refresh_item.id() => {
                     request_usage(event_proxy.clone());
                 }
@@ -82,6 +97,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     Ok(())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AppSettings {
+    #[serde(default)]
+    start_with_windows: bool,
+}
+
+impl AppSettings {
+    fn path() -> Option<PathBuf> {
+        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("WindowsCodexMonitor").join("settings.json"))
+    }
+
+    fn load() -> Self {
+        Self::path()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|contents| serde_json::from_str(&contents).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let path = Self::path().ok_or_else(|| "LOCALAPPDATA is unavailable".to_owned())?;
+        let directory = path.parent().ok_or_else(|| "Settings directory is unavailable".to_owned())?;
+        fs::create_dir_all(directory).map_err(|error| format!("Could not create settings directory: {error}"))?;
+        fs::write(path, serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("Could not save settings: {error}"))
+    }
+}
+
+fn set_auto_start(enabled: bool) -> Result<(), String> {
+    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run, _) = hkcu
+        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|error| format!("Could not open Windows startup settings: {error}"))?;
+    if enabled {
+        let executable = std::env::current_exe().map_err(|error| format!("Could not locate monitor executable: {error}"))?;
+        run.set_value("WindowsCodexMonitor", &format!("\"{}\"", executable.display()))
+            .map_err(|error| format!("Could not enable auto-start: {error}"))
+    } else {
+        match run.delete_value("WindowsCodexMonitor") {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not disable auto-start: {error}")),
+        }
+    }
 }
 
 fn diagnose() -> Result<(), String> {
