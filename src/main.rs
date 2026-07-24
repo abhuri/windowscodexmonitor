@@ -10,7 +10,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{Local, TimeZone};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
+use fontdue::{Font, FontSettings};
 use image::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,10 +32,10 @@ use winit::{
 };
 
 const ICON_SIZE: u32 = 32;
-const POPUP_WIDTH: u32 = 330;
-const POPUP_HEIGHT: u32 = 260;
-const REFRESH_BOUNDS: (f64, f64, f64, f64) = (206.0, 186.0, 103.0, 31.0);
-const AUTO_START_BOUNDS: (f64, f64, f64, f64) = (16.0, 224.0, 298.0, 28.0);
+const POPUP_WIDTH: u32 = 390;
+const POPUP_HEIGHT: u32 = 310;
+const REFRESH_BOUNDS: (f64, f64, f64, f64) = (256.0, 241.0, 114.0, 37.0);
+const AUTO_START_BOUNDS: (f64, f64, f64, f64) = (16.0, 282.0, 354.0, 28.0);
 
 #[derive(Debug)]
 enum UserEvent {
@@ -145,6 +147,7 @@ struct Popup {
     window: Rc<Window>,
     surface: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
     cursor: PhysicalPosition<f64>,
+    font: Option<Font>,
 }
 
 fn show_popup(
@@ -187,6 +190,7 @@ fn show_popup(
         window,
         surface,
         cursor: PhysicalPosition::new(-1.0, -1.0),
+        font: load_system_font(),
     });
 }
 
@@ -266,29 +270,42 @@ fn render_popup(popup: &mut Popup, state: &AppState, settings: &AppSettings) -> 
         .buffer_mut()
         .map_err(|error| error.to_string())?;
     let (width, height) = (buffer.width().get(), buffer.height().get());
-    buffer.fill(rgb(24, 27, 33));
+    buffer.fill(rgb(15, 23, 42));
     let scale = width as f32 / POPUP_WIDTH as f32;
-
-    draw_text(
+    rounded_rect(
         &mut buffer,
         width,
         height,
         16.0,
+        14.0,
+        358.0,
+        294.0,
         16.0,
-        2,
-        "CODEX WEEKLY",
-        rgb(222, 226, 233),
+        rgb(24, 34, 55),
         scale,
     );
-    draw_text(
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        17.0,
-        43.0,
-        1,
-        "remaining quota",
-        rgb(150, 159, 171),
+        popup.font.as_ref(),
+        32.0,
+        31.0,
+        18.0,
+        "Codex Monitor",
+        rgb(241, 245, 249),
+        scale,
+    );
+    draw_ui_text(
+        &mut buffer,
+        width,
+        height,
+        popup.font.as_ref(),
+        32.0,
+        55.0,
+        12.0,
+        "WEEKLY USAGE",
+        rgb(148, 163, 184),
         scale,
     );
     draw_popup_gauge(
@@ -300,88 +317,147 @@ fn render_popup(popup: &mut Popup, state: &AppState, settings: &AppSettings) -> 
         scale,
     );
 
-    let percentage = format!("{}% LEFT", state.remaining_percent);
-    draw_text(
+    let percentage = format!("{}%", state.remaining_percent);
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        140.0,
-        76.0,
-        3,
+        popup.font.as_ref(),
+        154.0,
+        66.0,
+        48.0,
         &percentage,
         zone_color(state),
         scale,
     );
-    let reset = state
-        .reset_at
-        .map(reset_summary)
-        .unwrap_or_else(|| "reset unknown".to_owned());
-    draw_text(
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        143.0,
-        119.0,
-        1,
-        &reset,
-        rgb(170, 178, 188),
+        popup.font.as_ref(),
+        158.0,
+        118.0,
+        14.0,
+        "weekly remaining",
+        rgb(203, 213, 225),
         scale,
     );
-    let status = format!("STATUS  {}", state.status.label().to_uppercase());
-    draw_text(
+    rounded_rect(
         &mut buffer,
         width,
         height,
+        158.0,
         143.0,
-        145.0,
-        1,
-        &status,
+        164.0,
+        28.0,
+        14.0,
         status_color(state.status),
         scale,
     );
-
-    fill_rect(
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        206.0,
-        186.0,
-        103.0,
-        31.0,
-        rgb(49, 91, 190),
+        popup.font.as_ref(),
+        173.0,
+        151.0,
+        12.0,
+        state.status.label(),
+        rgb(15, 23, 42),
         scale,
     );
-    draw_text(
+
+    let reset_remaining = state
+        .reset_at
+        .map(reset_summary)
+        .unwrap_or_else(|| "reset unknown".to_owned());
+    let reset_date = state
+        .reset_at
+        .map(reset_absolute)
+        .unwrap_or_else(|| "Date unavailable".to_owned());
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        224.0,
-        196.0,
-        1,
-        "REFRESH",
+        popup.font.as_ref(),
+        32.0,
+        190.0,
+        12.0,
+        "RESETS IN",
+        rgb(148, 163, 184),
+        scale,
+    );
+    draw_ui_text(
+        &mut buffer,
+        width,
+        height,
+        popup.font.as_ref(),
+        32.0,
+        207.0,
+        18.0,
+        &reset_remaining,
+        rgb(241, 245, 249),
+        scale,
+    );
+    draw_ui_text(
+        &mut buffer,
+        width,
+        height,
+        popup.font.as_ref(),
+        32.0,
+        232.0,
+        12.0,
+        &reset_date,
+        rgb(148, 163, 184),
+        scale,
+    );
+
+    rounded_rect(
+        &mut buffer,
+        width,
+        height,
+        256.0,
+        241.0,
+        114.0,
+        37.0,
+        10.0,
+        rgb(59, 130, 246),
+        scale,
+    );
+    draw_ui_text(
+        &mut buffer,
+        width,
+        height,
+        popup.font.as_ref(),
+        281.0,
+        253.0,
+        13.0,
+        "Refresh",
         rgb(255, 255, 255),
         scale,
     );
-    fill_rect(
+    rounded_rect(
         &mut buffer,
         width,
         height,
         16.0,
-        224.0,
-        298.0,
+        282.0,
+        354.0,
         28.0,
-        rgb(35, 40, 48),
+        10.0,
+        rgb(30, 41, 59),
         scale,
     );
-    draw_text(
+    draw_ui_text(
         &mut buffer,
         width,
         height,
-        27.0,
-        234.0,
-        1,
-        "START WITH WINDOWS",
-        rgb(205, 211, 220),
+        popup.font.as_ref(),
+        31.0,
+        290.0,
+        12.0,
+        "Start with Windows",
+        rgb(203, 213, 225),
         scale,
     );
     let toggle_color = if settings.start_with_windows {
@@ -389,40 +465,42 @@ fn render_popup(popup: &mut Popup, state: &AppState, settings: &AppSettings) -> 
     } else {
         rgb(100, 107, 119)
     };
-    fill_rect(
+    rounded_rect(
         &mut buffer,
         width,
         height,
-        274.0,
-        230.0,
-        27.0,
+        326.0,
+        288.0,
+        30.0,
         16.0,
+        8.0,
         toggle_color,
         scale,
     );
-    fill_rect(
+    draw_disc_u32(
         &mut buffer,
         width,
         height,
-        if settings.start_with_windows {
-            287.0
-        } else {
-            276.0
-        },
-        232.0,
-        12.0,
-        12.0,
+        (
+            if settings.start_with_windows {
+                347.0 * scale
+            } else {
+                335.0 * scale
+            },
+            296.0 * scale,
+        ),
+        6.0 * scale,
         rgb(245, 247, 250),
-        scale,
     );
     if let Some(error) = &state.last_error {
-        draw_text(
+        draw_ui_text(
             &mut buffer,
             width,
             height,
-            16.0,
-            188.0,
-            1,
+            popup.font.as_ref(),
+            32.0,
+            252.0,
+            11.0,
             &truncate(error, 28),
             rgb(238, 138, 79),
             scale,
@@ -507,6 +585,105 @@ fn zone_color_for(status: MonitorStatus, remaining_percent: u8) -> u32 {
     })
 }
 
+fn load_system_font() -> Option<Font> {
+    let path = Path::new(r"C:\Windows\Fonts\segoeui.ttf");
+    let bytes = fs::read(path).ok()?;
+    Font::from_bytes(bytes, FontSettings::default()).ok()
+}
+
+#[allow(clippy::too_many_arguments)] // Popup software renderer passes its compact drawing context explicitly.
+fn draw_ui_text(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    font: Option<&Font>,
+    x: f32,
+    y: f32,
+    point_size: f32,
+    text: &str,
+    color: u32,
+    dpi_scale: f32,
+) {
+    let Some(font) = font else {
+        draw_text(
+            buffer,
+            width,
+            height,
+            x,
+            y,
+            (point_size / 8.0).max(1.0) as u32,
+            text,
+            color,
+            dpi_scale,
+        );
+        return;
+    };
+    let mut cursor_x = (x * dpi_scale).round() as i32;
+    let cursor_y = (y * dpi_scale).round() as i32;
+    for character in text.chars() {
+        let (metrics, bitmap) = font.rasterize(character, point_size * dpi_scale);
+        for glyph_y in 0..metrics.height {
+            for glyph_x in 0..metrics.width {
+                let alpha = bitmap[glyph_y * metrics.width + glyph_x];
+                if alpha == 0 {
+                    continue;
+                }
+                let pixel_x = cursor_x + glyph_x as i32 + metrics.xmin;
+                let pixel_y = cursor_y + glyph_y as i32;
+                if pixel_x >= 0 && pixel_y >= 0 && pixel_x < width as i32 && pixel_y < height as i32
+                {
+                    let index = (pixel_y as u32 * width + pixel_x as u32) as usize;
+                    buffer[index] = blend(buffer[index], color, alpha);
+                }
+            }
+        }
+        cursor_x += metrics.advance_width.round() as i32;
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // A small software-drawn rounded rectangle avoids a GUI framework dependency.
+fn rounded_rect(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    rect_width: f32,
+    rect_height: f32,
+    radius: f32,
+    color: u32,
+    scale: f32,
+) {
+    let x = (x * scale).round() as i32;
+    let y = (y * scale).round() as i32;
+    let rect_width = (rect_width * scale).round() as i32;
+    let rect_height = (rect_height * scale).round() as i32;
+    let radius = radius * scale;
+    for row in y.max(0)..(y + rect_height).min(height as i32) {
+        for column in x.max(0)..(x + rect_width).min(width as i32) {
+            let nearest_x =
+                (column as f32).clamp(x as f32 + radius, (x + rect_width) as f32 - radius);
+            let nearest_y =
+                (row as f32).clamp(y as f32 + radius, (y + rect_height) as f32 - radius);
+            let dx = column as f32 - nearest_x;
+            let dy = row as f32 - nearest_y;
+            if dx * dx + dy * dy <= radius * radius {
+                buffer[(row as u32 * width + column as u32) as usize] = color;
+            }
+        }
+    }
+}
+
+fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
+    let alpha = u32::from(alpha);
+    let blend_channel = |shift: u32| {
+        let background = (background >> shift) & 0xff_u32;
+        let foreground = (foreground >> shift) & 0xff_u32;
+        (background * (255 - alpha) + foreground * alpha) / 255
+    };
+    (blend_channel(16) << 16) | (blend_channel(8) << 8) | blend_channel(0)
+}
+
 #[allow(clippy::too_many_arguments)] // Coordinates and pixel buffer stay explicit in this small software renderer.
 fn draw_text(
     buffer: &mut [u32],
@@ -543,30 +720,6 @@ fn draw_text(
         }
         cursor_x += 8 * glyph_scale as i32;
     }
-}
-
-#[allow(clippy::too_many_arguments)] // Keeps draw calls readable without a heap-allocated scene graph.
-fn fill_rect(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    x: f32,
-    y: f32,
-    rect_width: f32,
-    rect_height: f32,
-    color: u32,
-    scale: f32,
-) {
-    fill_rect_pixels(
-        buffer,
-        width,
-        height,
-        (x * scale).round() as i32,
-        (y * scale).round() as i32,
-        (rect_width * scale).round() as u32,
-        (rect_height * scale).round() as u32,
-        color,
-    );
 }
 
 #[allow(clippy::too_many_arguments)] // Low-level primitive intentionally exposes buffer and rectangle dimensions.
@@ -723,7 +876,7 @@ fn diagnose() -> Result<(), String> {
         .map(reset_summary)
         .unwrap_or_else(|| "reset unknown".to_owned());
     println!("Weekly remaining: {}%", quota.remaining_percent);
-    println!("{reset}");
+    println!("Resets in: {reset}");
     println!("Status: {}", status.label());
     Ok(())
 }
@@ -859,7 +1012,7 @@ impl AppState {
             .map(reset_summary)
             .unwrap_or_else(|| "reset unknown".to_owned());
         format!(
-            "Codex: {}% left | {} | {}",
+            "Codex: {}% left | reset {} | {}",
             self.remaining_percent,
             reset,
             self.status.label()
@@ -1113,5 +1266,13 @@ fn reset_summary(resets_at_unix_seconds: i64) -> String {
     let seconds = (resets_at_unix_seconds - now).max(0);
     let days = seconds / 86_400;
     let hours = (seconds % 86_400) / 3_600;
-    format!("reset {days}d {hours}h")
+    format!("{days}d {hours}h")
+}
+
+fn reset_absolute(resets_at_unix_seconds: i64) -> String {
+    Local
+        .timestamp_opt(resets_at_unix_seconds, 0)
+        .single()
+        .map(|time| time.format("%a, %d %b %Y · %H:%M %Z").to_string())
+        .unwrap_or_else(|| "Date unavailable".to_owned())
 }

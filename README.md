@@ -9,7 +9,7 @@ The tray icon is a gauge needle: its position and colour represent remaining wee
 - Reads Codex `account/rateLimits/read` through the local Codex app server.
 - Shows weekly remaining percentage and reset countdown in the tray tooltip.
 - Draws a native 32px gauge/needle tray icon.
-- Opens a compact native popup on left-click: gauge, remaining percentage, reset countdown, watchdog status, refresh action, and auto-start toggle.
+- Opens a compact native popup on left-click: gauge, remaining percentage, reset countdown plus exact local reset date/time, watchdog status, refresh action, and auto-start toggle.
 - Provides `Refresh now`, `Start with Windows`, and `Exit` from the tray menu.
 - Persists the auto-start preference under `%LOCALAPPDATA%\WindowsCodexMonitor` and, when enabled, writes only the current-user Windows Run entry.
 - Uses read-only Codex session-log and process signals for `Working`, `Waiting`, `Idle`, `Offline`, and `Suspected Hung`.
@@ -57,7 +57,7 @@ If Codex is installed in a non-standard location, set `CODEX_MONITOR_CODEX_PATH`
 
 ## Install from GitHub
 
-Every push to `main` is built and tested on GitHub Actions. A version tag such as `v0.1.1` creates a GitHub Release containing `WindowsCodexMonitor-win-x64.zip`. Extract the executable and run it on a Windows machine that has Codex installed and signed in.
+Every push to `main` is built and tested on GitHub Actions. A version tag such as `v0.1.2` creates a GitHub Release containing both `WindowsCodexMonitor-win-x64.zip` and `WindowsCodexMonitor-Setup-win-x64.exe`. The setup installer installs only for the current Windows user under `%LOCALAPPDATA%\Programs` and can launch the monitor immediately.
 
 ## Privacy and security
 

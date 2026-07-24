@@ -29,18 +29,31 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
       - name: Package executable
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/windowscodexmonitor.exe dist/WindowsCodexMonitor.exe
           Compress-Archive -Path dist/WindowsCodexMonitor.exe -DestinationPath WindowsCodexMonitor-win-x64.zip
+          $iscc = Get-ChildItem @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $iscc) { throw "Inno Setup compiler was not found" }
+          & $iscc.FullName "/DMyAppVersion=$env:GITHUB_REF_NAME" installer/windowscodexmonitor.iss
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: WindowsCodexMonitor-win-x64
-          path: WindowsCodexMonitor-win-x64.zip
+          path: |
+            WindowsCodexMonitor-win-x64.zip
+            dist/WindowsCodexMonitor-Setup-win-x64.exe
           if-no-files-found: error
 
       - name: Create GitHub release for a version tag
@@ -48,4 +61,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create $env:GITHUB_REF_NAME WindowsCodexMonitor-win-x64.zip --generate-notes --title $env:GITHUB_REF_NAME
+        run: gh release create $env:GITHUB_REF_NAME WindowsCodexMonitor-win-x64.zip dist/WindowsCodexMonitor-Setup-win-x64.exe --generate-notes --title $env:GITHUB_REF_NAME
