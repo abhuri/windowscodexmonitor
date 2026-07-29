@@ -42,7 +42,7 @@ cargo run --release
 Use the non-UI diagnostic mode to verify local Codex access:
 
 ```powershell
-cargo run --release -- --diagnose
+cargo run -- --diagnose
 ```
 
 For a visual popup check during development:

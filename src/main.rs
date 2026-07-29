@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Write},
@@ -9,6 +14,9 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use chrono::{Local, TimeZone};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
@@ -34,6 +42,8 @@ use winit::{
 const ICON_SIZE: u32 = 32;
 const POPUP_WIDTH: u32 = 390;
 const POPUP_HEIGHT: u32 = 310;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const REFRESH_BOUNDS: (f64, f64, f64, f64) = (256.0, 241.0, 114.0, 37.0);
 const AUTO_START_BOUNDS: (f64, f64, f64, f64) = (16.0, 282.0, 354.0, 28.0);
 
@@ -968,7 +978,11 @@ fn read_watchdog_status() -> MonitorStatus {
 }
 
 fn codex_process_present() -> bool {
-    Command::new("tasklist")
+    let mut tasklist = Command::new("tasklist");
+    #[cfg(windows)]
+    tasklist.creation_flags(CREATE_NO_WINDOW);
+
+    tasklist
         .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
         .output()
         .map(|output| {
@@ -1101,7 +1115,11 @@ fn request_usage(proxy: EventLoopProxy<UserEvent>) {
 }
 
 fn read_codex_quota() -> Result<WeeklyQuota, String> {
-    let mut child = Command::new(find_codex_executable()?)
+    let mut command = Command::new(find_codex_executable()?);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
