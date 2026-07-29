@@ -7,7 +7,7 @@ The tray icon is a gauge needle: its position and colour represent remaining wee
 ## Current MVP
 
 - Reads Codex `account/rateLimits/read` through the local Codex app server.
-- Shows weekly remaining percentage and reset countdown in the tray tooltip.
+- Refreshes weekly remaining usage automatically every minute and shows it with the reset countdown in the tray tooltip.
 - Draws a native 32px gauge/needle tray icon.
 - Opens a compact native popup on left-click: gauge, remaining percentage, reset countdown plus exact local reset date/time, watchdog status, refresh action, and auto-start toggle.
 - Provides `Refresh now`, `Start with Windows`, and `Exit` from the tray menu.

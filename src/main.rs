@@ -10,7 +10,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -44,6 +48,7 @@ const POPUP_WIDTH: u32 = 390;
 const POPUP_HEIGHT: u32 = 310;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const REFRESH_BOUNDS: (f64, f64, f64, f64) = (256.0, 241.0, 114.0, 37.0);
 const AUTO_START_BOUNDS: (f64, f64, f64, f64) = (16.0, 282.0, 354.0, 28.0);
 
@@ -88,7 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let event_proxy = proxy.clone();
     let mut popup = None;
-    request_usage(proxy);
+    let usage_request_in_flight = Arc::new(AtomicBool::new(false));
+    start_usage_refresh(proxy, usage_request_in_flight.clone());
     start_watchdog(event_proxy.clone());
 
     event_loop.run(move |event, target| {
@@ -122,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     request_popup_redraw(&popup);
                 }
                 UserEvent::Menu(menu_event) if menu_event.id == refresh_item.id() => {
-                    request_usage(event_proxy.clone());
+                    request_usage(event_proxy.clone(), usage_request_in_flight.clone());
                 }
                 UserEvent::Menu(menu_event) if menu_event.id == quit_item.id() => target.exit(),
                 UserEvent::Tray(TrayIconEvent::Click {
@@ -130,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..
                 }) => {
                     show_popup(target, &popup_context, &mut popup);
-                    request_usage(event_proxy.clone());
+                    request_usage(event_proxy.clone(), usage_request_in_flight.clone());
                 }
                 _ => {}
             }
@@ -140,12 +146,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_some_and(|current| current.window.id() == window_id)
         {
             handle_popup_event(
-                target,
                 &event_proxy,
                 &mut settings,
                 &auto_start_item,
                 &mut state,
                 &mut popup,
+                &usage_request_in_flight,
                 event,
             );
         }
@@ -211,12 +217,12 @@ fn request_popup_redraw(popup: &Option<Popup>) {
 }
 
 fn handle_popup_event(
-    _target: &ActiveEventLoop,
     proxy: &EventLoopProxy<UserEvent>,
     settings: &mut AppSettings,
     auto_start_item: &CheckMenuItem,
     state: &mut AppState,
     popup: &mut Option<Popup>,
+    usage_request_in_flight: &Arc<AtomicBool>,
     event: WindowEvent,
 ) {
     match event {
@@ -238,7 +244,7 @@ fn handle_popup_event(
                 .cursor
                 .to_logical::<f64>(current.window.scale_factor());
             if contains(logical_cursor, REFRESH_BOUNDS) {
-                request_usage(proxy.clone());
+                request_usage(proxy.clone(), usage_request_in_flight.clone());
             } else if contains(logical_cursor, AUTO_START_BOUNDS) {
                 settings.start_with_windows = !settings.start_with_windows;
                 if let Err(error) = set_auto_start(settings.start_with_windows) {
@@ -1108,9 +1114,24 @@ fn install_event_handlers(proxy: EventLoopProxy<UserEvent>) {
     }));
 }
 
-fn request_usage(proxy: EventLoopProxy<UserEvent>) {
+fn start_usage_refresh(proxy: EventLoopProxy<UserEvent>, usage_request_in_flight: Arc<AtomicBool>) {
+    thread::spawn(move || loop {
+        request_usage(proxy.clone(), usage_request_in_flight.clone());
+        thread::sleep(USAGE_REFRESH_INTERVAL);
+    });
+}
+
+fn request_usage(proxy: EventLoopProxy<UserEvent>, usage_request_in_flight: Arc<AtomicBool>) {
+    if usage_request_in_flight
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
     thread::spawn(move || {
-        let _ = proxy.send_event(UserEvent::Usage(read_codex_quota()));
+        let result = read_codex_quota();
+        usage_request_in_flight.store(false, Ordering::Release);
+        let _ = proxy.send_event(UserEvent::Usage(result));
     });
 }
 
