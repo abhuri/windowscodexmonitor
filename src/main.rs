@@ -1258,10 +1258,8 @@ fn render_gauge_icon(
     status: MonitorStatus,
 ) -> Result<Icon, tray_icon::BadIcon> {
     let mut image = RgbaImage::from_pixel(ICON_SIZE, ICON_SIZE, Rgba([0, 0, 0, 0]));
-    let center = (15.5_f32, 16.0_f32);
-    let radius = 12.5_f32;
-    let zone_color = match status {
-        MonitorStatus::Offline => [120, 124, 132, 255],
+    let accent = match status {
+        MonitorStatus::Offline => [148, 163, 184, 255],
         _ => match GaugeZone::for_remaining(remaining_percent) {
             GaugeZone::Green => [67, 201, 122, 255],
             GaugeZone::Yellow => [246, 201, 63, 255],
@@ -1269,54 +1267,109 @@ fn render_gauge_icon(
             GaugeZone::Red => [228, 75, 75, 255],
         },
     };
+    draw_icon_rounded_rect(&mut image, 1, 1, 30, 30, 6, Rgba([15, 23, 42, 255]));
+    draw_icon_rounded_rect(&mut image, 3, 26, 26, 3, 1, Rgba(accent));
 
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = x as f32 - center.0;
-            let dy = y as f32 - center.1;
-            let distance = (dx * dx + dy * dy).sqrt();
-            if (radius - 2.0..=radius).contains(&distance) {
-                image.put_pixel(x, y, Rgba([57, 62, 70, 255]));
-            }
-        }
-    }
-
-    let pointer_angle = (-135.0 + f32::from(remaining_percent) * 2.7).to_radians();
-    let end = (
-        center.0 + pointer_angle.cos() * 10.0,
-        center.1 + pointer_angle.sin() * 10.0,
+    // `>_` is intentionally tiny: it brands the badge as Codex while leaving
+    // the scarce notification-area pixels to the remaining percentage.
+    draw_icon_prompt(&mut image, 6, 6, Rgba([203, 213, 225, 255]));
+    let label = if remaining_percent == 100 {
+        "100".to_owned()
+    } else {
+        format!("{remaining_percent}%")
+    };
+    let scale = 2;
+    let label_width = label.chars().count() as u32 * 4 * scale - scale;
+    draw_icon_text(
+        &mut image,
+        ((ICON_SIZE - label_width) / 2) as i32,
+        15,
+        scale,
+        &label,
+        Rgba([248, 250, 252, 255]),
     );
-    draw_line(&mut image, center, end, Rgba(zone_color));
-    draw_disc(&mut image, center, 2.2, Rgba(zone_color));
 
     Icon::from_rgba(image.into_raw(), ICON_SIZE, ICON_SIZE)
 }
 
-fn draw_line(image: &mut RgbaImage, start: (f32, f32), end: (f32, f32), color: Rgba<u8>) {
-    let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0) as u32;
-    for step in 0..=steps {
-        let t = step as f32 / steps.max(1) as f32;
-        draw_disc(
-            image,
-            (
-                start.0 + (end.0 - start.0) * t,
-                start.1 + (end.1 - start.1) * t,
-            ),
-            1.0,
-            color,
-        );
+fn draw_icon_rounded_rect(
+    image: &mut RgbaImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    radius: u32,
+    color: Rgba<u8>,
+) {
+    for pixel_y in y..y + height {
+        for pixel_x in x..x + width {
+            let nearest_x = pixel_x.clamp(x + radius, x + width - radius - 1);
+            let nearest_y = pixel_y.clamp(y + radius, y + height - radius - 1);
+            let dx = pixel_x as i32 - nearest_x as i32;
+            let dy = pixel_y as i32 - nearest_y as i32;
+            if dx * dx + dy * dy <= (radius * radius) as i32 {
+                image.put_pixel(pixel_x, pixel_y, color);
+            }
+        }
     }
 }
 
-fn draw_disc(image: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = x as f32 - center.0;
-            let dy = y as f32 - center.1;
-            if dx * dx + dy * dy <= radius * radius {
-                image.put_pixel(x, y, color);
+fn draw_icon_prompt(image: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>) {
+    for (offset_x, offset_y) in [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (1, 3),
+        (0, 4),
+        (4, 4),
+        (5, 4),
+        (6, 4),
+    ] {
+        image.put_pixel(x + offset_x, y + offset_y, color);
+    }
+}
+
+fn draw_icon_text(image: &mut RgbaImage, x: i32, y: i32, scale: u32, text: &str, color: Rgba<u8>) {
+    let mut cursor_x = x;
+    for character in text.chars() {
+        let glyph = compact_glyph(character);
+        for (row, bits) in glyph.iter().enumerate() {
+            for column in 0..3 {
+                if bits & (1 << (2 - column)) != 0 {
+                    for offset_y in 0..scale {
+                        for offset_x in 0..scale {
+                            let pixel_x = cursor_x + column * scale as i32 + offset_x as i32;
+                            let pixel_y = y + row as i32 * scale as i32 + offset_y as i32;
+                            if pixel_x >= 0
+                                && pixel_y >= 0
+                                && pixel_x < ICON_SIZE as i32
+                                && pixel_y < ICON_SIZE as i32
+                            {
+                                image.put_pixel(pixel_x as u32, pixel_y as u32, color);
+                            }
+                        }
+                    }
+                }
             }
         }
+        cursor_x += 4 * scale as i32;
+    }
+}
+
+fn compact_glyph(character: char) -> [u8; 5] {
+    match character {
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        '%' => [0b101, 0b001, 0b010, 0b100, 0b101],
+        _ => [0; 5],
     }
 }
 

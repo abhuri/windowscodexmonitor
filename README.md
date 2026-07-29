@@ -57,7 +57,7 @@ If Codex is installed in a non-standard location, set `CODEX_MONITOR_CODEX_PATH`
 
 ## Install from GitHub
 
-Every push to `main` is built and tested on GitHub Actions. A version tag such as `v0.1.4` creates a GitHub Release containing both `WindowsCodexMonitor-win-x64.zip` and `WindowsCodexMonitor-Setup-win-x64.exe`. The setup installer installs only for the current Windows user under `%LOCALAPPDATA%\Programs` and can launch the monitor immediately.
+Every push to `main` is built and tested on GitHub Actions. A version tag such as `v0.1.5` creates a GitHub Release containing both `WindowsCodexMonitor-win-x64.zip` and `WindowsCodexMonitor-Setup-win-x64.exe`. The setup installer installs only for the current Windows user under `%LOCALAPPDATA%\Programs` and can launch the monitor immediately.
 
 ## Privacy and security
 
