@@ -674,7 +674,14 @@ fn draw_ui_text(
         return;
     };
     let mut cursor_x = (x * dpi_scale).round() as i32;
-    let cursor_y = (y * dpi_scale).round() as i32;
+    // Keep every glyph on the font's baseline. The prior renderer placed each
+    // bitmap at its own top edge, which made digits, symbols, and letters look
+    // vertically misaligned.
+    let baseline_y = (y * dpi_scale).round() as i32
+        + font
+            .horizontal_line_metrics(point_size * dpi_scale)
+            .map(|metrics| metrics.ascent.round() as i32)
+            .unwrap_or_else(|| (point_size * dpi_scale * 0.8).round() as i32);
     for character in text.chars() {
         let (metrics, bitmap) = font.rasterize(character, point_size * dpi_scale);
         for glyph_y in 0..metrics.height {
@@ -684,7 +691,7 @@ fn draw_ui_text(
                     continue;
                 }
                 let pixel_x = cursor_x + glyph_x as i32 + metrics.xmin;
-                let pixel_y = cursor_y + glyph_y as i32;
+                let pixel_y = baseline_y - metrics.height as i32 - metrics.ymin + glyph_y as i32;
                 if pixel_x >= 0 && pixel_y >= 0 && pixel_x < width as i32 && pixel_y < height as i32
                 {
                     let index = (pixel_y as u32 * width + pixel_x as u32) as usize;
