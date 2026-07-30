@@ -40,7 +40,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, Event, MouseButton as WinitMouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
-    window::{Window, WindowAttributes, WindowLevel},
+    window::{Icon as WindowIcon, Window, WindowAttributes, WindowLevel},
 };
 
 const ICON_SIZE: u32 = 32;
@@ -193,6 +193,7 @@ fn show_popup(
             f64::from(POPUP_HEIGHT),
         ))
         .with_resizable(false)
+        .with_window_icon(application_window_icon())
         .with_window_level(WindowLevel::AlwaysOnTop);
     let Ok(window) = target.create_window(attributes) else {
         return;
@@ -1292,6 +1293,22 @@ fn update_tray(tray: &TrayIcon, state: &AppState) {
     let _ = tray.set_tooltip(Some(state.tooltip()));
 }
 
+fn application_window_icon() -> Option<WindowIcon> {
+    const SIZE: u32 = 64;
+    let mut image = RgbaImage::from_pixel(SIZE, SIZE, Rgba([0, 0, 0, 0]));
+    draw_icon_rounded_rect(&mut image, 2, 2, 60, 60, 13, Rgba([15, 23, 42, 255]));
+
+    for (x, y) in [(49, 12), (54, 15), (54, 21), (49, 24), (44, 21), (44, 15)] {
+        draw_icon_ring(&mut image, x, y, 5, 3, Rgba([67, 201, 122, 255]));
+    }
+    let foreground = Rgba([248, 250, 252, 255]);
+    draw_icon_ring(&mut image, 21, 27, 9, 5, foreground);
+    draw_icon_ring(&mut image, 43, 48, 9, 5, foreground);
+    draw_icon_line(&mut image, 47, 20, 18, 55, 5, foreground);
+
+    WindowIcon::from_rgba(image.into_raw(), SIZE, SIZE).ok()
+}
+
 fn render_gauge_icon(
     remaining_percent: u8,
     status: MonitorStatus,
@@ -1350,6 +1367,56 @@ fn draw_icon_rounded_rect(
                 image.put_pixel(pixel_x, pixel_y, color);
             }
         }
+    }
+}
+
+fn draw_icon_ring(
+    image: &mut RgbaImage,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    width: i32,
+    color: Rgba<u8>,
+) {
+    let outer = radius + width / 2;
+    let inner = (radius - width / 2).max(0);
+    for y in center_y - outer..=center_y + outer {
+        for x in center_x - outer..=center_x + outer {
+            let distance_squared = (x - center_x).pow(2) + (y - center_y).pow(2);
+            if distance_squared <= outer.pow(2) && distance_squared >= inner.pow(2) {
+                put_icon_pixel(image, x, y, color);
+            }
+        }
+    }
+}
+
+fn draw_icon_line(
+    image: &mut RgbaImage,
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+    width: i32,
+    color: Rgba<u8>,
+) {
+    let steps = (end_x - start_x).abs().max((end_y - start_y).abs());
+    for step in 0..=steps {
+        let progress = step as f32 / steps as f32;
+        let x = (start_x as f32 + (end_x - start_x) as f32 * progress).round() as i32;
+        let y = (start_y as f32 + (end_y - start_y) as f32 * progress).round() as i32;
+        for offset_y in -width / 2..=width / 2 {
+            for offset_x in -width / 2..=width / 2 {
+                if offset_x.pow(2) + offset_y.pow(2) <= (width / 2).pow(2) {
+                    put_icon_pixel(image, x + offset_x, y + offset_y, color);
+                }
+            }
+        }
+    }
+}
+
+fn put_icon_pixel(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
+    if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
+        image.put_pixel(x as u32, y as u32, color);
     }
 }
 
