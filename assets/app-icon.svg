@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title>Windows Codex Monitor</title>
+  <rect x="14" y="14" width="228" height="228" rx="52" fill="#0f172a"/>
+  <g fill="none" stroke="#43c97a" stroke-width="9">
+    <circle cx="202" cy="48" r="15"/>
+    <circle cx="220" cy="59" r="15"/>
+    <circle cx="220" cy="80" r="15"/>
+    <circle cx="202" cy="91" r="15"/>
+    <circle cx="184" cy="80" r="15"/>
+    <circle cx="184" cy="59" r="15"/>
+  </g>
+  <g fill="none" stroke="#f8fafc" stroke-linecap="round">
+    <circle cx="82" cy="103" r="27" stroke-width="14"/>
+    <circle cx="174" cy="193" r="27" stroke-width="14"/>
+    <path d="M179 81 77 215" stroke-width="15"/>
+  </g>
+</svg>
